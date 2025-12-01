@@ -1,0 +1,282 @@
+import torch as t
+import torch.nn as nn
+import torch.nn.functional as F
+import model_utils.cfg as cfg
+import numpy as np
+import os
+import math
+import random
+from torch.utils import data
+from torch.optim.lr_scheduler import LambdaLR
+from torch import optim
+from torch.autograd import Variable
+from torch.utils.data import DataLoader
+from datetime import datetime
+from SAM.build_sam import ModelSAMEnhanced  # 改为使用增强版
+from model_utils.dataset_split import Dataset_train, Dataset_val_test
+# from model_utils.evalution_segmentation import eval_semantic_segmentation
+from model_utils.evalution_segmentation import eval_semantic_segmentation,get_dice
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+from model_utils.losses import DiceBCELoss, FocalLoss, TverskyLoss, calculate_pos_weight
+np.seterr(divide='ignore', invalid='ignore')
+
+def set_seed(seed=0):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    t.manual_seed(seed)
+    t.cuda.manual_seed(seed)
+    t.cuda.manual_seed_all(seed)
+    t.backends.cudnn.deterministic = True
+    t.backends.cudnn.benchmark = False
+
+set_seed(42)
+
+device = t.device('cuda') if t.cuda.is_available() else t.device('cpu')
+
+train = Dataset_train([cfg.TRAIN_IMG_ROOT, cfg.TRAIN_LBL_ROOT])
+
+val = Dataset_val_test([cfg.TRAIN_IMG_ROOT, cfg.TRAIN_LBL_ROOT])
+
+def split_ids(len_ids):
+    train_q = 80
+    train_size = int(round((train_q / 100) * len_ids))
+    valid_size = int(round(((90-train_q) / 100) * len_ids))
+    test_size = int(round((10 / 100) * len_ids))
+
+    train_indices, test_indices = train_test_split(
+        np.linspace(0, len_ids - 1, len_ids).astype("int"),
+        test_size=test_size,
+        random_state=42,
+    )
+
+    train_indices, val_indices = train_test_split(
+        train_indices, test_size=valid_size, random_state=42
+    )
+
+    return train_indices, test_indices, val_indices, train_q
+
+input_data_len = len(sorted(os.listdir(cfg.TRAIN_IMG_ROOT)))
+train_indices, test_indices, val_indices, train_q = split_ids(input_data_len)
+
+train = data.Subset(train, train_indices)
+val = data.Subset(val, val_indices)
+
+train_data = DataLoader(train, batch_size=cfg.BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True, prefetch_factor=2)
+val_data = DataLoader(val, batch_size=cfg.BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True, prefetch_factor=2)
+
+# 创建增强版SAM模型
+image_size = cfg.image_size
+sam = ModelSAMEnhanced(
+    image_size=image_size,
+    num_classes=1,
+    model_type="vit_b",  # 可以选择 "vit_b", "vit_l", "vit_h"
+    checkpoint="./SAM/sam_vit_b_01ec64.pth",  # 预训练权重路径
+    use_lora=False,
+    lora_rank=16,
+    lora_alpha=32.0,
+    lora_dropout=0.1,
+    use_token_accumulation=True,
+    token_momentum=0.9,
+    coarse_loss_weight=0.9,
+    final_loss_weight=0.0,
+    contrastive_loss_weight=0.1,
+).to(device)
+
+# 定义损失函数
+# pos_weight_value = calculate_pos_weight(train_data)
+# pos_weight_value = min(pos_weight_value, 20.0)  # 限制最大权重，避免过度补偿
+# pos_weight = t.tensor([pos_weight_value]).to(device)
+# criterion = FocalLoss(alpha=0.25, gamma=2.0).to(device)
+# criterion = DiceBCELoss(
+#     weight_dice=0.8,  # Dice loss 的权重
+#     weight_bce=0.2,   # BCE loss 的权重
+#     pos_weight=pos_weight
+# ).to(device)
+
+# 只优化可训练参数（LoRA和新模块）
+trainable_params = sam.get_trainable_params()
+# optimizer = optim.AdamW(trainable_params, lr=cfg.lr, weight_decay=1e-8)
+criterion = nn.NLLLoss().to(device)
+optimizer = optim.AdamW(trainable_params, lr=cfg.lr, weight_decay=1e-4) 
+# 学习率调度器
+total_epochs = cfg.EPOCH_NUMBER
+warmup_epochs = 10
+cosine_decay_epochs = total_epochs - warmup_epochs
+
+def warmup_lr(epoch):
+    if epoch < warmup_epochs:
+        return (epoch + 1) / warmup_epochs
+    else:
+        return 1
+
+def cosine_decay_lr(epoch):
+    return 0.5 * (1 + math.cos((epoch - warmup_epochs) / cosine_decay_epochs * math.pi))
+
+def combined_lr(epoch):
+    return warmup_lr(epoch) * cosine_decay_lr(epoch)
+
+scheduler = LambdaLR(optimizer, lr_lambda=combined_lr)
+
+def train(model):
+    best = [0]
+    best_epoch = 0
+    iter_train = 0
+    iter_val = 0
+
+    for epoch in range(cfg.EPOCH_NUMBER):
+        print("Start the {} epoch of model training".format(epoch + 1))
+
+        train_loss = 0
+        train_coarse_loss = 0
+        train_final_loss = 0
+        train_contrastive_loss = 0
+        train_acc = 0
+        train_miou = 0
+        train_class_acc = 0
+        total = 0
+
+        net = model.train()
+
+        train_time = datetime.now()
+        train_bar = tqdm(train_data, colour='blue')
+
+        for i, sample in enumerate(train_bar):
+            iter_train += 1
+            labels = sample['label']
+            total += labels.size(0)
+
+            img_data = Variable(sample['img'].to(device))
+            img_label = Variable(sample['label'].to(device))
+
+            # 获取增强模型的所有输出
+            out1 = net(img_data, use_accumulated_tokens=True, return_all_outputs=True)
+            out = out1['coarse_masks']
+            out2=out1['contrastive_loss']
+            out = F.log_softmax(out, dim=1)
+            preout = out.max(dim=1)[1].data.cpu().numpy()
+            gtout = img_label.data.cpu().numpy()
+            DICE_loss = 1-get_dice(preout, gtout)
+
+            BCE_loss = criterion(out, img_label)
+
+            loss = 0.8*(BCE_loss + DICE_loss) + 0.2*out2
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        
+            train_bar.desc = "train epoch[{}/{}] loss:{:.3f}".format(epoch + 1,
+                                                                     cfg.EPOCH_NUMBER,
+                                                                     loss.item())
+
+            preout = out.max(dim=1)[1].data.cpu().numpy()
+            gtout = img_label.data.cpu().numpy()
+
+            pre_label = out.max(dim=1)[1].data.cpu().numpy()
+            pre_label = [i for i in pre_label]
+
+            true_label = img_label.data.cpu().numpy()
+            true_label = [i for i in true_label]
+
+            eval_metrix = eval_semantic_segmentation(pre_label, true_label, preout, gtout)
+            train_acc +=    eval_metrix['mean_class_accuracy']
+            train_miou += eval_metrix['miou']
+            train_class_acc += eval_metrix['class_accuracy']
+        
+        scheduler.step()
+
+        for group in optimizer.param_groups:
+            print('The current learning rate is:', group['lr'])
+
+       
+        metric_description = '|Train Acc|: {:.5f}|Train Mean IU|: {:.5f}\n|Train_class_acc|:{:}'.format(
+            train_acc / len(train_data),
+            train_miou / len(train_data),
+            train_class_acc / len(train_data)
+        )
+        print(metric_description)
+
+        cur_time = datetime.now()
+        h, remainder = divmod((cur_time - train_time).seconds, 3600)
+        m, s = divmod(remainder, 60)
+        time_str = 'Train_Time: {:.0f}:{:.0f}:{:.0f}'.format(h, m, s)
+        print(time_str)
+        # 验证
+        if (epoch + 1) % 1 == 0:
+            print("Start the {} epoch of model verification".format(epoch + 1))
+            net = model.eval()
+
+            eval_loss = 0
+            eval_acc = 0
+            eval_miou = 0
+            eval_class_acc = 0
+            total_val = 0
+
+            val_time = datetime.now()
+            val_bar = tqdm(val_data, colour='red')
+            
+            with t.no_grad():
+                for j, sample in enumerate(val_bar):
+                    iter_val += 1
+                    labels_ = sample['label']
+                    total_val += labels_.size(0)
+
+                    valImg = Variable(sample['img'].to(device))
+                    valLabel = Variable(sample['label'].long().to(device))
+                    out = net(valImg, use_accumulated_tokens=True, return_all_outputs=  False)
+                    out = F.log_softmax(out, dim=1)
+                
+                    val_loss = criterion(out, valLabel)
+                    eval_loss = val_loss.item() + eval_loss
+
+                    val_bar.desc = "val iteration[{}/{}] loss:{:.3f}".format(j + 1,
+                                                                             len(val_data),
+                                                                             val_loss.item())
+
+                    preout = out.max(dim=1)[1].data.cpu().numpy()
+                    gtout = valLabel.data.cpu().numpy()
+
+                    pre_label = out.max(dim=1)[1].data.cpu().numpy()
+                    pre_label = [i for i in pre_label]
+
+                    true_label = valLabel.data.cpu().numpy()
+                    true_label = [i for i in true_label]
+
+                    eval_metrics = eval_semantic_segmentation(pre_label, true_label, preout, gtout)
+                    eval_acc = eval_metrics['mean_class_accuracy'] + eval_acc
+                    eval_miou = eval_metrics['miou'] + eval_miou
+                    eval_class_acc = eval_metrics['class_accuracy'] + eval_class_acc
+
+                val_str = (
+                    '|Valid Loss|: {:.5f} \n|Valid Acc|: {:.5f} \n|Valid Mean IU|: {:.5f} \n|Valid Class Acc|:{:}'.format(
+                        eval_loss / len(val_data),
+                        eval_acc / len(val_data),
+                        eval_miou / len(val_data),
+                        eval_class_acc / len(val_data)))
+                print(val_str)
+                cur_time = datetime.now()
+                h, remainder = divmod((cur_time - val_time).seconds, 3600)
+                m, s = divmod(remainder, 60)
+                time_str = 'Val_Time: {:.0f}:{:.0f}:{:.0f}'.format(h, m, s)
+                print(time_str)
+
+                if max(best) <= eval_miou / len(val_data):
+                    best.append(eval_miou / len(val_data))
+                    # 保存整个模型状态
+                    t.save(net.state_dict(), './weight/enhanced_sam_epoch_{}.pth'.format(epoch + 1))
+                    best_epoch = epoch + 1
+                print("The maximum IOU of the current model is {:.5f}, and the corresponding number of epochs is {}".format(best[-1], best_epoch))
+
+if __name__ == "__main__":
+    # 打印模型信息
+    total_params = sum(p.numel() for p in sam.parameters())
+    trainable_params = sum(p.numel() for p in sam.get_trainable_params())
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Trainable ratio: {trainable_params/total_params:.2%}")
+    
+    # 开始训练
+    train(sam)
