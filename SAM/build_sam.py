@@ -33,7 +33,6 @@ def _build_sam_with_token_enhancement(
         final_loss_weight=0.2,
         contrastive_loss_weight=0.01,
 ):
-    """构建带有Token增强的SAM模型"""
     prompt_embed_dim = 256
     vit_patch_size = 16
     image_embedding_size = image_size // vit_patch_size
@@ -245,7 +244,6 @@ sam_model_registry = {
 
 
 class ModelSAMEnhanced(nn.Module):
-    """增强版的SAM模型封装，包含Token Enhancement"""
     def __init__(
         self, 
         image_size=512, 

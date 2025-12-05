@@ -12,7 +12,7 @@ from .prompt_encoder import PromptEncoder
 from .transformer import TwoWayTransformer
 from .common import LayerNorm2d, MLPBlock
 
-# 新增的模块
+
 from .feature_extraction import (
     FeatureSeparationModule,
     SimpleContrastiveLoss,
@@ -29,7 +29,6 @@ __all__ = [
     'TwoWayTransformer',
     'LayerNorm2d',
     'MLPBlock',
-    # 新增
     'FeatureSeparationModule',
     'SimpleContrastiveLoss',
     'TokenAccumulator',

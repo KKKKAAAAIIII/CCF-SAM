@@ -17,16 +17,7 @@ from .feature_extraction import (
 
 
 class SAMWithTokenEnhancement(nn.Module):
-    """
-    扩展的SAM模型，包含token增强机制
-    实现了完整的训练pipeline：
-    1. Image → Image Encoder → Image Embeddings
-    2. Image Embeddings → Mask Decoder → Coarse Mask
-    3. Coarse Mask → Feature Separation → Target/BG Tokens
-    4. Tokens + Image Embeddings → Cross Attention → Updated Embeddings
-    5. Updated Embeddings → Mask Decoder → Final Mask
-    6. Token Accumulation across images
-    """
+
     
     def __init__(
         self,
@@ -124,17 +115,7 @@ class SAMWithTokenEnhancement(nn.Module):
         use_accumulated_tokens: bool = True,
         return_all_outputs: bool = True,
     ) -> Dict[str, torch.Tensor]:
-        """
-        完整的前向传播流程
-        
-        Args:
-            images: Input images [B, 3, H, W]
-            use_accumulated_tokens: Whether to use accumulated tokens from previous images
-            return_all_outputs: Whether to return intermediate outputs
-            
-        Returns:
-            Dictionary containing masks, tokens, losses, etc.
-        """
+       
         # 1. Preprocess and encode images
         images = self.preprocess(images)
         image_embeddings = self.image_encoder(images)  # [B, C, H, W]
@@ -171,13 +152,13 @@ class SAMWithTokenEnhancement(nn.Module):
         contrastive_loss = self.contrastive_loss_fn(target_token, bg_token)
         # 4. Token enhancement with accumulation
         if use_accumulated_tokens and self.use_token_accumulation:
-            # 新的调用方式：直接将当前token传入，获取更新后的增强token
+
             enhanced_target, enhanced_bg = self.token_accumulator(
                 target_token,
                 bg_token
             )
         else:
-            # 如果不使用累积，则直接使用当前token
+
             enhanced_target = target_token
             enhanced_bg = bg_token
         
@@ -234,17 +215,7 @@ class SAMWithTokenEnhancement(nn.Module):
         use_accumulated_tokens: bool = True,
         return_all_outputs: bool = True,
     ) ->List[Dict[str, torch.Tensor]]:
-        """
-        完整的前向传播流程
-        
-        Args:
-            images: Input images [B, 3, H, W]
-            use_accumulated_tokens: Whether to use accumulated tokens from previous images
-            return_all_outputs: Whether to return intermediate outputs
-            
-        Returns:
-            Dictionary containing masks, tokens, losses, etc.
-        """
+       
         # 1. Preprocess and encode images
         images = self.preprocess(images)
         image_embeddings = self.image_encoder(images)  # [B, C, H, W]
@@ -281,13 +252,13 @@ class SAMWithTokenEnhancement(nn.Module):
             
         # 4. Token enhancement with accumulation
             if use_accumulated_tokens and self.use_token_accumulation:
-            # 新的调用方式：直接将当前token传入，获取更新后的增强token
+
                 enhanced_target, enhanced_bg = self.token_accumulator(
                 target_token,
                 bg_token
             )
             else:
-            # 如果不使用累积，则直接使用当前token
+
                 enhanced_target = target_token
                 enhanced_bg = bg_token
         
@@ -322,94 +293,9 @@ class SAMWithTokenEnhancement(nn.Module):
                 }
             )
         return outputs
-        # 2. Generate coarse masks (first pass through decoder)
-        # No prompts for automatic segmentation
-        # sparse_embeddings, dense_embeddings = self.prompt_encoder(
-        #     points=None, 
-        #     boxes=None, 
-        #     masks=None
-        # )
+       
         
-        # coarse_mask, coarse_iou_predictions = self.mask_decoder(
-        #     image_embeddings=image_embeddings,
-        #     image_pe=self.prompt_encoder.get_dense_pe(),
-        #     sparse_prompt_embeddings=sparse_embeddings,
-        #     dense_prompt_embeddings=dense_embeddings,
-        #     multimask_output=True
-        # )
-        # coarse_masks = self.postprocess_masks(
-        #     coarse_mask,
-        #     input_size=(256, 256),
-        #     original_size=(256, 256)
-        # )
-        # # 3. Feature separation and token generation
-        # # Use the first mask for binary segmentation
-        # separation_output = self.feature_separator(
-        #     coarse_mask[:, 0:1, :, :],
-        #     image_embeddings=image_embeddings.detach()
-        # )
-        
-        # target_token = separation_output['target_token']
-        # bg_token = separation_output['background_token']
-        # contrastive_loss = self.contrastive_loss_fn(target_token, bg_token)
-        # # 4. Token enhancement with accumulation
-        # if use_accumulated_tokens and self.use_token_accumulation:
-        #     # 新的调用方式：直接将当前token传入，获取更新后的增强token
-        #     enhanced_target, enhanced_bg = self.token_accumulator(
-        #         target_token,
-        #         bg_token
-        #     )
-        # else:
-        #     # 如果不使用累积，则直接使用当前token
-        #     enhanced_target = target_token
-        #     enhanced_bg = bg_token
-        
-        # # contrastive_loss = self.contrastive_loss_fn(enhanced_target, enhanced_bg)
-        # # 5. Cross attention to enhance image embeddings
-        # updated_embeddings = self.cross_attention(
-        #     image_embeddings,
-        #     enhanced_target,
-        #     enhanced_bg
-        # )
-        
-        # # 6. Generate final masks with enhanced embeddings
-        # final_mask, final_iou_predictions = self.mask_decoder(
-        #     image_embeddings=updated_embeddings,
-        #     image_pe=self.prompt_encoder.get_dense_pe(),
-        #     sparse_prompt_embeddings=sparse_embeddings,
-        #     dense_prompt_embeddings=dense_embeddings,
-        #     multimask_output=True
-        # )
 
-        # final_masks = self.postprocess_masks(
-        #     final_mask,
-        #     input_size=(256, 256),
-        #     original_size=(256, 256)
-        # )
-
-        # # Prepare outputs
-        # outputs = {
-        #     'final_masks': final_masks,
-        #     'coarse_masks': coarse_masks,
-        #     'contrastive_loss': contrastive_loss,
-        #     'coarse_iou_predictions': coarse_iou_predictions,
-        #     'final_iou_predictions': final_iou_predictions,
-        # }
-        
-        # if return_all_outputs:
-        #     outputs.update({
-        #         'target_token': target_token,
-        #         'background_token': bg_token,
-        #         'enhanced_target_token': enhanced_target,
-        #         'enhanced_background_token': enhanced_bg,
-        
-        #         'image_embeddings': image_embeddings,
-        #         'updated_embeddings': updated_embeddings,
-        #         'coarse_iou_predictions': coarse_iou_predictions,
-        #     'final_iou_predictions': final_iou_predictions
-        #     })
-        
-        # return outputs
     def preprocess(self, x: torch.Tensor) -> torch.Tensor:
         """Normalize pixel values and pad to a square input."""
         # Normalize colors

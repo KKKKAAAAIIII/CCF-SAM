@@ -12,7 +12,7 @@ from torch import optim
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from datetime import datetime
-from SAM.build_sam import ModelSAMEnhanced  # 改为使用增强版
+from SAM.build_sam import ModelSAMEnhanced  
 from model_utils.dataset_split import Dataset_train, Dataset_val_test
 # from model_utils.evalution_segmentation import eval_semantic_segmentation
 from model_utils.evalution_segmentation import eval_semantic_segmentation,get_dice
@@ -66,13 +66,13 @@ val = data.Subset(val, val_indices)
 train_data = DataLoader(train, batch_size=cfg.BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True, prefetch_factor=2)
 val_data = DataLoader(val, batch_size=cfg.BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True, prefetch_factor=2)
 
-# 创建增强版SAM模型
+
 image_size = cfg.image_size
 sam = ModelSAMEnhanced(
     image_size=image_size,
     num_classes=1,
-    model_type="vit_b",  # 可以选择 "vit_b", "vit_l", "vit_h"
-    checkpoint="./SAM/sam_vit_b_01ec64.pth",  # 预训练权重路径
+    model_type="vit_b",  
+    checkpoint="./SAM/sam_vit_b_01ec64.pth",  
     use_lora=False,
     lora_rank=16,
     lora_alpha=32.0,
@@ -84,23 +84,14 @@ sam = ModelSAMEnhanced(
     contrastive_loss_weight=0.1,
 ).to(device)
 
-# 定义损失函数
-# pos_weight_value = calculate_pos_weight(train_data)
-# pos_weight_value = min(pos_weight_value, 20.0)  # 限制最大权重，避免过度补偿
-# pos_weight = t.tensor([pos_weight_value]).to(device)
-# criterion = FocalLoss(alpha=0.25, gamma=2.0).to(device)
-# criterion = DiceBCELoss(
-#     weight_dice=0.8,  # Dice loss 的权重
-#     weight_bce=0.2,   # BCE loss 的权重
-#     pos_weight=pos_weight
-# ).to(device)
 
-# 只优化可训练参数（LoRA和新模块）
+
+
 trainable_params = sam.get_trainable_params()
 # optimizer = optim.AdamW(trainable_params, lr=cfg.lr, weight_decay=1e-8)
 criterion = nn.NLLLoss().to(device)
 optimizer = optim.AdamW(trainable_params, lr=cfg.lr, weight_decay=1e-4) 
-# 学习率调度器
+
 total_epochs = cfg.EPOCH_NUMBER
 warmup_epochs = 10
 cosine_decay_epochs = total_epochs - warmup_epochs
@@ -150,7 +141,6 @@ def train(model):
             img_data = Variable(sample['img'].to(device))
             img_label = Variable(sample['label'].to(device))
 
-            # 获取增强模型的所有输出
             out1 = net(img_data, use_accumulated_tokens=True, return_all_outputs=True)
             out = out1['coarse_masks']
             out2=out1['contrastive_loss']
@@ -204,7 +194,7 @@ def train(model):
         m, s = divmod(remainder, 60)
         time_str = 'Train_Time: {:.0f}:{:.0f}:{:.0f}'.format(h, m, s)
         print(time_str)
-        # 验证
+       
         if (epoch + 1) % 1 == 0:
             print("Start the {} epoch of model verification".format(epoch + 1))
             net = model.eval()
@@ -265,18 +255,17 @@ def train(model):
 
                 if max(best) <= eval_miou / len(val_data):
                     best.append(eval_miou / len(val_data))
-                    # 保存整个模型状态
+                  
                     t.save(net.state_dict(), './weight/enhanced_sam_epoch_{}.pth'.format(epoch + 1))
                     best_epoch = epoch + 1
                 print("The maximum IOU of the current model is {:.5f}, and the corresponding number of epochs is {}".format(best[-1], best_epoch))
 
 if __name__ == "__main__":
-    # 打印模型信息
+
     total_params = sum(p.numel() for p in sam.parameters())
     trainable_params = sum(p.numel() for p in sam.get_trainable_params())
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Trainable ratio: {trainable_params/total_params:.2%}")
     
-    # 开始训练
     train(sam)
